@@ -24,8 +24,8 @@ from enum import Enum
 
 class RecognitionLevel(Enum):
     """Mức độ nhận dạng văn bản"""
-    FAST = "fast"       # Nhanh nhưng độ chính xác thấp hơn
-    ACCURATE = "accurate"  # Chậm hơn nhưng chính xác hơn
+    FAST = 1        # Nhanh nhưng độ chính xác thấp hơn
+    ACCURATE = 0    # Chậm hơn nhưng chính xác hơn
 
 
 class OCRTool:
@@ -62,75 +62,50 @@ class OCRTool:
         self.languages = languages
         self.min_confidence = min_confidence
 
-        # Lazy loading các module iOS
-        self._objc = None
-        self._Vision = None
-        self._UIKit = None
-        self._Foundation = None
+        # Lazy loading các class iOS
+        self._VNRecognizeTextRequest = None
+        self._VNImageRequestHandler = None
+        self._UIImage = None
+        self._NSData = None
+        self._NSArray = None
         self._is_ios = None
+        self._objc_util = None
 
     @property
     def is_ios(self) -> bool:
         """Kiểm tra xem đang chạy trên iOS/Pyto không"""
         if self._is_ios is None:
             try:
-                import objc
+                from objc_util import ObjCClass
                 self._is_ios = True
             except ImportError:
-                try:
-                    from rubicon.objc import ObjCClass
-                    self._is_ios = True
-                except ImportError:
-                    self._is_ios = False
+                self._is_ios = False
         return self._is_ios
 
     def _load_ios_modules(self):
         """Load các module iOS cần thiết"""
-        if self._objc is not None:
+        if self._objc_util is not None:
             return
 
         try:
-            # Thử import objc module của Pyto
-            import objc
-            self._objc = objc
+            import objc_util
+            self._objc_util = objc_util
 
-            # Load Vision framework
-            from objc import load_framework
-            load_framework("Vision")
+            # Import các class cần thiết từ Vision và UIKit
+            ObjCClass = objc_util.ObjCClass
 
-            # Import các class cần thiết
-            self._VNRecognizeTextRequest = objc.objc_class("VNRecognizeTextRequest")
-            self._VNImageRequestHandler = objc.objc_class("VNImageRequestHandler")
-            self._UIImage = objc.objc_class("UIImage")
-            self._NSURL = objc.objc_class("NSURL")
-            self._NSData = objc.objc_class("NSData")
+            self._VNRecognizeTextRequest = ObjCClass("VNRecognizeTextRequest")
+            self._VNImageRequestHandler = ObjCClass("VNImageRequestHandler")
+            self._UIImage = ObjCClass("UIImage")
+            self._NSData = ObjCClass("NSData")
+            self._NSArray = ObjCClass("NSArray")
+            self._NSDictionary = ObjCClass("NSDictionary")
 
         except ImportError:
-            try:
-                # Thử rubicon-objc (backup option)
-                from rubicon.objc import ObjCClass, load_library
-
-                load_library("Vision")
-
-                self._VNRecognizeTextRequest = ObjCClass("VNRecognizeTextRequest")
-                self._VNImageRequestHandler = ObjCClass("VNImageRequestHandler")
-                self._UIImage = ObjCClass("UIImage")
-                self._NSURL = ObjCClass("NSURL")
-                self._NSData = ObjCClass("NSData")
-
-            except ImportError:
-                raise RuntimeError(
-                    "Không thể import objc module. "
-                    "Tool này yêu cầu chạy trên iOS với Pyto app."
-                )
-
-    def _get_recognition_level_constant(self):
-        """Lấy constant cho recognition level"""
-        # VNRequestTextRecognitionLevel
-        # 0 = accurate, 1 = fast
-        if self.recognition_level == RecognitionLevel.FAST:
-            return 1
-        return 0
+            raise RuntimeError(
+                "Không thể import objc_util module. "
+                "Tool này yêu cầu chạy trên iOS với Pyto app."
+            )
 
     def _load_image(self, image_path: str):
         """
@@ -149,8 +124,10 @@ class OCRTool:
         abs_path = os.path.abspath(image_path)
 
         try:
+            ns = self._objc_util.ns
+
             # Sử dụng NSData và UIImage
-            data = self._NSData.dataWithContentsOfFile_(abs_path)
+            data = self._NSData.dataWithContentsOfFile_(ns(abs_path))
             if data is None:
                 raise ValueError(f"Không thể đọc file: {image_path}")
 
@@ -173,12 +150,14 @@ class OCRTool:
             VNImageRequestHandler object
         """
         # Lấy CGImage từ UIImage
-        cg_image = image.CGImage
+        cg_image = image.CGImage()
         if cg_image is None:
             raise ValueError("Không thể lấy CGImage từ UIImage")
 
-        # Tạo handler với options
-        options = {}
+        # Tạo empty dictionary cho options
+        options = self._NSDictionary.dictionary()
+
+        # Tạo handler
         handler = self._VNImageRequestHandler.alloc().initWithCGImage_options_(
             cg_image, options
         )
@@ -209,6 +188,7 @@ class OCRTool:
             return self._recognize_text_fallback(image_path)
 
         self._load_ios_modules()
+        ns = self._objc_util.ns
 
         # Load ảnh
         image = self._load_image(image_path)
@@ -219,41 +199,55 @@ class OCRTool:
         # Tạo text recognition request
         request = self._VNRecognizeTextRequest.alloc().init()
 
-        # Cấu hình request
-        request.setRecognitionLevel_(self._get_recognition_level_constant())
+        # Cấu hình recognition level
+        request.setRecognitionLevel_(self.recognition_level.value)
 
         # Thiết lập ngôn ngữ nếu có
         if self.languages:
-            request.setRecognitionLanguages_(self.languages)
+            lang_array = self._NSArray.arrayWithObjects_count_(
+                [ns(lang) for lang in self.languages],
+                len(self.languages)
+            )
+            request.setRecognitionLanguages_(lang_array)
 
         # Thiết lập custom words nếu có
         if custom_words:
-            request.setCustomWords_(custom_words)
+            words_array = self._NSArray.arrayWithObjects_count_(
+                [ns(word) for word in custom_words],
+                len(custom_words)
+            )
+            request.setCustomWords_(words_array)
+
+        # Tạo NSArray chứa request
+        requests_array = self._NSArray.arrayWithObject_(request)
 
         # Thực hiện request
-        error = None
-        success = handler.performRequests_error_([request], error)
+        from ctypes import c_void_p, byref
+        error_ptr = c_void_p()
+        success = handler.performRequests_error_(requests_array, byref(error_ptr))
 
         if not success:
-            raise RuntimeError(f"OCR request thất bại: {error}")
+            raise RuntimeError(f"OCR request thất bại")
 
         # Lấy kết quả
-        results = request.results
-        if not results:
+        results = request.results()
+        if results is None or results.count() == 0:
             return ""
 
         # Xử lý kết quả
         recognized_texts = []
-        for observation in results:
+        for i in range(results.count()):
+            observation = results.objectAtIndex_(i)
+
             # Lấy top candidate
             candidates = observation.topCandidates_(1)
-            if candidates and len(candidates) > 0:
-                candidate = candidates[0]
-                confidence = candidate.confidence
+            if candidates is not None and candidates.count() > 0:
+                candidate = candidates.objectAtIndex_(0)
+                confidence = float(candidate.confidence())
 
                 # Kiểm tra độ tin cậy
                 if confidence >= self.min_confidence:
-                    text = str(candidate.string)
+                    text = str(candidate.string())
                     recognized_texts.append(text)
 
         return "\n".join(recognized_texts)
@@ -286,6 +280,7 @@ class OCRTool:
             return []
 
         self._load_ios_modules()
+        ns = self._objc_util.ns
 
         # Load ảnh
         image = self._load_image(image_path)
@@ -295,42 +290,52 @@ class OCRTool:
 
         # Tạo text recognition request
         request = self._VNRecognizeTextRequest.alloc().init()
-        request.setRecognitionLevel_(self._get_recognition_level_constant())
+        request.setRecognitionLevel_(self.recognition_level.value)
 
         if self.languages:
-            request.setRecognitionLanguages_(self.languages)
+            lang_array = self._NSArray.arrayWithObjects_count_(
+                [ns(lang) for lang in self.languages],
+                len(self.languages)
+            )
+            request.setRecognitionLanguages_(lang_array)
+
+        # Tạo NSArray chứa request
+        requests_array = self._NSArray.arrayWithObject_(request)
 
         # Thực hiện request
-        error = None
-        success = handler.performRequests_error_([request], error)
+        from ctypes import c_void_p, byref
+        error_ptr = c_void_p()
+        success = handler.performRequests_error_(requests_array, byref(error_ptr))
 
         if not success:
-            raise RuntimeError(f"OCR request thất bại: {error}")
+            raise RuntimeError(f"OCR request thất bại")
 
         # Lấy kết quả với locations
-        results = []
-        observations = request.results
+        result_list = []
+        observations = request.results()
 
-        if observations:
-            for observation in observations:
+        if observations is not None:
+            for i in range(observations.count()):
+                observation = observations.objectAtIndex_(i)
+
                 candidates = observation.topCandidates_(1)
-                if candidates and len(candidates) > 0:
-                    candidate = candidates[0]
-                    confidence = float(candidate.confidence)
+                if candidates is not None and candidates.count() > 0:
+                    candidate = candidates.objectAtIndex_(0)
+                    confidence = float(candidate.confidence())
 
                     if confidence >= self.min_confidence:
-                        text = str(candidate.string)
+                        text = str(candidate.string())
 
-                        # Lấy bounding box
-                        bbox = observation.boundingBox
+                        # Lấy bounding box (CGRect)
+                        bbox = observation.boundingBox()
                         x = float(bbox.origin.x)
                         y = float(bbox.origin.y)
                         width = float(bbox.size.width)
                         height = float(bbox.size.height)
 
-                        results.append((text, confidence, (x, y, width, height)))
+                        result_list.append((text, confidence, (x, y, width, height)))
 
-        return results
+        return result_list
 
     def get_supported_languages(self) -> List[str]:
         """
@@ -356,16 +361,22 @@ class OCRTool:
         self._load_ios_modules()
 
         try:
+            from ctypes import c_void_p, byref
+
             # Tạo request để lấy supported languages
             request = self._VNRecognizeTextRequest.alloc().init()
-            request.setRecognitionLevel_(self._get_recognition_level_constant())
+            request.setRecognitionLevel_(self.recognition_level.value)
 
             # iOS 14+ có supportedRecognitionLanguages
-            error = None
-            languages = request.supportedRecognitionLanguagesAndReturnError_(error)
+            error_ptr = c_void_p()
+            languages = request.supportedRecognitionLanguagesAndReturnError_(byref(error_ptr))
 
-            if languages:
-                return [str(lang) for lang in languages]
+            if languages is not None:
+                result = []
+                for i in range(languages.count()):
+                    lang = languages.objectAtIndex_(i)
+                    result.append(str(lang))
+                return result
         except Exception:
             pass
 
